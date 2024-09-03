@@ -7,117 +7,106 @@ import (
 	"time"
 )
 
-// Message representa uma mensagem na fila, contendo um conteúdo e um tópico.
-type Message struct {
-	Content string // Conteúdo da mensagem
-	Topic   string // Tópico ao qual a mensagem pertence
+type Product struct {
+	Name     string
+	Category string
 }
 
-// MessageQueue é uma estrutura thread-safe para gerenciar filas de mensagens baseadas em tópicos.
-type MessageQueue struct {
-	queues map[string]chan Message // Mapa de nomes de tópicos para seus respectivos canais de mensagens
-	mu     sync.Mutex              // Mutex para proteger o acesso concorrente ao mapa
+type Stock struct {
+	inventory map[string]chan Product
+	mu        sync.Mutex
 }
 
-// NewMessageQueue inicializa uma nova MessageQueue com um mapa vazio de filas.
-func NewMessageQueue() *MessageQueue {
-	return &MessageQueue{
-		queues: make(map[string]chan Message),
+func NewStock() *Stock {
+	return &Stock{
+		inventory: make(map[string]chan Product),
 	}
 }
 
-// Publish adiciona uma mensagem à fila do tópico especificado. Se o tópico não existir, cria um novo canal.
-func (mq *MessageQueue) Publish(message Message) {
-	mq.mu.Lock()         // Trava o mapa para garantir acesso seguro em concorrência
-	defer mq.mu.Unlock() // Garante que o mutex seja destravado após a operação
+func (s *Stock) AddProduct(product Product) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	// Verifica se o tópico já possui uma fila
-	ch, exists := mq.queues[message.Topic]
-	if !exists {
-		// Cria um novo canal para o tópico se ele não existir
-		ch = make(chan Message, 10) // Tamanho do buffer de 10; pode ser ajustado
-		mq.queues[message.Topic] = ch
+	if _, exists := s.inventory[product.Category]; !exists {
+		s.inventory[product.Category] = make(chan Product, 100)
 	}
-
-	// Envia a mensagem para o canal do tópico
-	ch <- message
+	s.inventory[product.Category] <- product
 }
 
-// Subscribe retorna um canal que escuta mensagens do tópico especificado. Cria um novo canal se o tópico não existir.
-func (mq *MessageQueue) Subscribe(topic string) <-chan Message {
-	mq.mu.Lock()         // Trava o mapa para garantir acesso seguro em concorrência
-	defer mq.mu.Unlock() // Garante que o mutex seja destravado após a operação
+func (s *Stock) ConsumeProduct(category string) (Product, int, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	// Verifica se o tópico já possui uma fila
-	ch, exists := mq.queues[topic]
-	if !exists {
-		// Cria um novo canal para o tópico se ele não existir
-		ch = make(chan Message, 10) // Tamanho do buffer de 10; pode ser ajustado
-		mq.queues[topic] = ch
-	}
-
-	// Retorna o canal para o tópico
-	return ch
-}
-
-// Producer simula um produtor de mensagens que publica mensagens em tópicos aleatórios.
-func Producer(mq *MessageQueue, topics []string, wg *sync.WaitGroup) {
-	defer wg.Done() // Decrementa o contador do WaitGroup quando a função termina
-
-	for {
-		// Seleciona um tópico aleatório da lista
-		topic := topics[rand.Intn(len(topics))]
-
-		// Cria uma nova mensagem com o tópico selecionado
-		message := Message{
-			Content: fmt.Sprintf("Mensagem no %s às %d", topic, time.Now().Unix()),
-			Topic:   topic,
+	if ch, exists := s.inventory[category]; exists {
+		select {
+		case product := <-ch:
+			remaining := len(ch)
+			return product, remaining, true
+		default:
+			return Product{}, 0, false
 		}
-
-		// Publica a mensagem na fila
-		mq.Publish(message)
-
-		// Loga a mensagem publicada
-		fmt.Println("Publicado:", message.Content)
-
-		// Simula algum trabalho com um sleep
-		time.Sleep(time.Second)
 	}
+
+	return Product{}, 0, false
 }
 
-// Consumer simula um consumidor de mensagens que processa mensagens de um tópico específico.
-func Consumer(mq *MessageQueue, topic string, wg *sync.WaitGroup) {
-	defer wg.Done() // Decrementa o contador do WaitGroup quando a função termina
+func (s *Stock) IsEmpty() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
 
-	// Inscreve-se no canal de mensagens do tópico
-	ch := mq.Subscribe(topic)
-
-	// Processa as mensagens conforme elas chegam
-	for message := range ch {
-		fmt.Printf("Consumidor no %s consumiu: %s\n", topic, message.Content)
+	for _, ch := range s.inventory {
+		if len(ch) > 0 {
+			return false
+		}
 	}
+	return true
 }
 
 func main() {
-	// Inicializa a fila de mensagens
-	mq := NewMessageQueue()
+	stock := NewStock()
 
-	// Lista de tópicos a serem usados no sistema pub-sub
-	topics := []string{"topic1", "topic2", "topic3", "topic4", "topic5", "topic6", "topic7", "topic8"}
-	var wg sync.WaitGroup
-
-	// Inicia múltiplos produtores
-	for i := 0; i < 4; i++ {
-		wg.Add(1)
-		go Producer(mq, topics, &wg)
+	categories := map[string][]string{
+		"Frutas":     {"Maçã", "Banana", "Laranja"},
+		"Vegetais":   {"Cenoura", "Batata", "Tomate"},
+		"Laticínios": {"Leite", "Queijo", "Iogurte"},
+		"Carnes":     {"Frango", "Carne Bovina", "Peixe"},
+		"Bebidas":    {"Água", "Suco de Laranja", "Refrigerante"},
 	}
 
-	// Inicia múltiplos consumidores, alternando entre os tópicos
-	for i := 0; i < 8; i++ {
-		wg.Add(1)
-		go Consumer(mq, topics[i%len(topics)], &wg)
-	}
+	go func() {
+		for category, products := range categories {
+			for _, product := range products {
+				stock.AddProduct(Product{Name: product, Category: category})
+				time.Sleep(time.Millisecond * time.Duration(rand.Intn(100)))
+			}
+		}
+	}()
 
-	// Aguarda todas as goroutines terminarem
-	wg.Wait()
+	go func() {
+		for {
+			if stock.IsEmpty() {
+				fmt.Println("Todas as categorias estão vazias. Encerrando o consumo.")
+				break
+			}
+
+			catIndex := rand.Intn(len(categories))
+			var category string
+			for cat := range categories {
+				if catIndex == 0 {
+					category = cat
+					break
+				}
+				catIndex--
+			}
+
+			if product, remaining, ok := stock.ConsumeProduct(category); ok {
+				fmt.Printf("Consumiu: %s da categoria %s. Produtos restantes na categoria: %d\n", product.Name, product.Category, remaining)
+			} else {
+				fmt.Printf("Categoria %s está vazia\n", category)
+			}
+			time.Sleep(time.Millisecond * time.Duration(rand.Intn(150)))
+		}
+	}()
+
+	time.Sleep(5 * time.Second)
 }
